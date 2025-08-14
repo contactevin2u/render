@@ -288,25 +288,26 @@ app.post("/api/intake/parse", async (req, res) => {
         { role: "system", content: system },
         { role: "user", content: user }
       ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "oms_order",
-          schema,
-          strict: true
-        }
-      }
+      text: { format: "json_schema", json_schema: { name: "oms_order", schema, strict: true } }}
     });
 
-    const content = resp?.output?.[0]?.content?.[0];
-    const parsed = content && content.type === "output_text"
-      ? JSON.parse(content.text)
-      : JSON.parse(resp.output_text); // fallback if SDK shape differs
-
-    return res.json(parsed);
+    let parsed;
+try {
+  if (resp && resp.output_text) {
+    parsed = JSON.parse(resp.output_text);
+  } else {
+    const maybe = resp?.output?.[0]?.content?.[0];
+    if (maybe?.type === "output_text") parsed = JSON.parse(maybe.text);
+  }
+} catch (e) {
+  throw new Error("Model returned non-JSON or invalid JSON");
+}
+return res.json(parsed || {});
   } catch (e) {
     console.error("[intake-parse]", e?.message || e);
     // try to surface model text if any
     return res.status(400).json({ error: e?.message || "Parse failed" });
   }
 });
+
+
