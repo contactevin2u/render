@@ -140,6 +140,27 @@ app.post("/api/transactions", async (req, res) => {
 });
 
 // -------- Outstanding ----------
+//
+// -------- Schedules (recurring payments) ----------
+app.post("/api/schedules", async (req, res) => {
+  const b = req.body || {};
+  if (!b.order_id || !b.schedule_type || !b.frequency || b.amount_myr === undefined || !b.next_due_date)
+    return res.status(400).json({ error: "missing required fields" });
+
+  const amount_cents = Math.round(Number(b.amount_myr) * 100);
+  try {
+    const r = await pool.query(
+      `INSERT INTO recurring_schedules (order_id, schedule_type, frequency, amount_cents, total_cycles, next_due_date, grace_days)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING id`,
+      [b.order_id, b.schedule_type, b.frequency, amount_cents, b.total_cycles || null, b.next_due_date, b.grace_days || 3]
+    );
+    res.status(201).json({ schedule_id: r.rows[0].id });
+  } catch (e) {
+    console.error("[add-schedule]", e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
 app.get("/api/outstanding", async (req, res) => {
   const type = req.query.type;
   const dueBefore = req.query.due_before || new Date().toISOString().slice(0, 10); 
@@ -209,3 +230,4 @@ app.get("/api/outstanding", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`API running on port ${PORT}`);
 });
+

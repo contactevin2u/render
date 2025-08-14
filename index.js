@@ -235,3 +235,78 @@ app.listen(PORT, () => {
 
 
 
+const OpenAI = require("openai");
+const oaClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ---- AI Intake: Parse pasted WhatsApp text into structured order ----
+app.post("/api/intake/parse", async (req, res) => {
+  try {
+    const { text } = req.body || {};
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "Provide { text }" });
+    }
+
+    // Strict JSON schema for the OMS fields
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        customer_name: { type: "string" },
+        customer_address: { type: "string" },
+        customer_phone_primary: { type: "string" },
+        customer_phone_secondary: { type: "string" },
+        order_type: { enum: ["outright_purchase","instalment","rent"] },
+        line_items: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              product_code: { type: "string" },
+              description: { type: "string" },
+              qty: { type: "number" },
+              unit_price_myr: { type: "number" }
+            },
+            required: ["description","qty","unit_price_myr"]
+          }
+        },
+        delivery_type: { enum: ["one_way","two_way"] },
+        action_type: { enum: ["new_order","cancel_instalment","terminate_rental","buy_back"] },
+        original_order_id: { type: "string" }
+      },
+      required: ["customer_name","customer_phone_primary","order_type","line_items"]
+    };
+
+    // Prompt in EN+MY; ask the model to infer sensibly & return ONLY JSON
+    const system = `You convert unstructured WhatsApp chats (English or Malay) into a strict JSON object that matches the provided JSON schema. If a field is unknown, omit it. Never fabricate prices/items.`;
+    const user = `Chat transcript:\n---\n${text}\n---\nReturn JSON only.`;
+
+    // Use Responses API with structured JSON output
+    const resp = await oaClient.responses.create({
+      model: "gpt-4o-mini", // cost-effective; change if you prefer another
+      input: [
+        { role: "system", content: system },
+        { role: "user", content: user }
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "oms_order",
+          schema,
+          strict: true
+        }
+      }
+    });
+
+    const content = resp?.output?.[0]?.content?.[0];
+    const parsed = content && content.type === "output_text"
+      ? JSON.parse(content.text)
+      : JSON.parse(resp.output_text); // fallback if SDK shape differs
+
+    return res.json(parsed);
+  } catch (e) {
+    console.error("[intake-parse]", e?.message || e);
+    // try to surface model text if any
+    return res.status(400).json({ error: e?.message || "Parse failed" });
+  }
+});
