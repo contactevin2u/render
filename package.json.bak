@@ -5,8 +5,7 @@
     "main":  "index.js",
     "scripts":  {
                     "db:apply":  "node apply-ddl.js",
-                    "test":  "echo \"Error: no test specified\" \u0026\u0026 exit 1",
-                    "start":  "node index.js"
+                    "test":  "echo \"Error: no test specified\" \u0026\u0026 exit 1"
                 },
     "keywords":  [
 
