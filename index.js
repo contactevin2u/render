@@ -1,4 +1,5 @@
-﻿const MY_TZ = process.env.TZ || "Asia/Kuala_Lumpur"; const dateStrInTZ = (d = new Date()) => new Intl.DateTimeFormat("en-CA", { timeZone: MY_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d); const asUTCmidnight = (yyyy_mm_dd) => new Date(yyyy_mm_dd + "T00:00:00Z");
+﻿const toYMD = (v)=> (typeof v==="string" ? v.slice(0,10) : (isNaN(new Date(v)) ? null : new Date(v).toISOString().slice(0,10)));
+const MY_TZ = process.env.TZ || "Asia/Kuala_Lumpur"; const dateStrInTZ = (d = new Date()) => new Intl.DateTimeFormat("en-CA", { timeZone: MY_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d); const asUTCmidnight = (yyyy_mm_dd) => new Date(yyyy_mm_dd + "T00:00:00Z");
 require("dotenv").config();
 const express = require("express");
 const { Pool } = require("pg");
@@ -201,7 +202,7 @@ app.get("/api/outstanding", async (req, res) => {
     const due = Number(s.amount_cents);
     const outstanding = Math.max(due - paid, 0);
 
-    const dueStr = String(s.next_due_date).slice(0, 10); const dueUTC = asUTCmidnight(dueStr); const daysLate = Math.floor((+today - +dueUTC) / 86400000) - Number(s.grace_days || 0);
+    const dueStr = toYMD(s.next_due_date); const dueUTC = asUTCmidnight(dueStr); const daysLate = Math.floor((+today - +dueUTC) / 86400000) - Number(s.grace_days || 0);
     let bucket = "current";
     if (daysLate > 0 && daysLate <= 7) bucket = "1-7";
     else if (daysLate >= 8 && daysLate <= 30) bucket = "8-30";
@@ -231,5 +232,6 @@ app.get("/api/outstanding", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`API running on port ${PORT}`);
 });
+
 
 
