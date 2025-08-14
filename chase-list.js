@@ -82,3 +82,5 @@ async function runChaseList() {
 
 // Run the chase list manually
 runChaseList();
+
+console.log('Chase run @', new Date().toISOString());
