@@ -283,6 +283,9 @@ app.post("/api/intake/parse", async (req, res) => {
   }
 });
 
+const path = require("path");
+app.use(express.static(path.join(__dirname, "public")));
+
 // ---------- Listen ----------
 app.listen(PORT, () => {
   console.log(`API running on port ${PORT}`);
