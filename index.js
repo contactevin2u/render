@@ -316,6 +316,77 @@ app.post("/api/intake/parse", async (req, res) => {
   }
 });
     }
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(400).json({ error: "OPENAI_API_KEY is required" });
+    }
+
+    // Strict JSON schema for OMS fields
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        customer_name: { type: "string" },
+        customer_address: { type: "string" },
+        customer_phone_primary: { type: "string" },
+        customer_phone_secondary: { type: "string" },
+        order_type: { enum: ["outright_purchase","instalment","rent"] },
+        line_items: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              product_code: { type: "string" },
+              description: { type: "string" },
+              qty: { type: "number" },
+              unit_price_myr: { type: "number" }
+            },
+            required: ["description","qty","unit_price_myr"]
+          }
+        },
+        delivery_type: { enum: ["one_way","two_way"] },
+        action_type: { enum: ["new_order","cancel_instalment","terminate_rental","buy_back"] },
+        original_order_id: { type: "string" }
+      },
+      required: ["customer_name","customer_phone_primary","order_type","line_items"]
+    };
+
+    const system = `You convert unstructured WhatsApp chats (English or Malay) into a strict JSON object that matches the provided JSON schema. If a field is unknown, omit it. Never fabricate prices/items.`;
+    const user = `Chat transcript:\\n---\\n${text}\\n---\\nReturn JSON only.`;
+
+    // Responses API — structured output lives under text.format (json_schema)
+    const resp = await oaClient.responses.create({
+      model: "gpt-4o-mini",
+      input: [
+        { role: "system", content: system },
+        { role: "user",   content: user }
+      ],
+      text: {
+        format: "json_schema",
+        json_schema: { name: "oms_order", schema, strict: true }
+      }
+    });
+
+    // Robust parse across SDK shapes
+    let parsed;
+    try {
+      if (resp && resp.output_text) {
+        parsed = JSON.parse(resp.output_text);
+      } else {
+        const maybe = resp?.output?.[0]?.content?.[0];
+        if (maybe?.type === "output_text") parsed = JSON.parse(maybe.text);
+      }
+    } catch {
+      throw new Error("Model returned non-JSON or invalid JSON");
+    }
+
+    return res.json(parsed || {});
+  } catch (e) {
+    console.error("[intake-parse]", e?.message || e);
+    return res.status(400).json({ error: e?.message || "Parse failed" });
+  }
+});
+    }
 
     // Strict JSON schema for the OMS fields
     const schema = {
@@ -380,6 +451,7 @@ return res.json(parsed || {});
     return res.status(400).json({ error: e?.message || "Parse failed" });
   }
 });
+
 
 
 
