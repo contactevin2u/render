@@ -287,3 +287,5 @@ app.post("/api/intake/parse", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`API running on port ${PORT}`);
 });
+// auto-added intake2 router
+try { const intake2 = require("./routes/intake2"); app.use("/api/intake2", intake2); console.log("Mounted /api/intake2"); } catch (e) { console.error("Failed to mount /api/intake2", e); }
