@@ -25,15 +25,14 @@ app.use(cors({
     cb(null, ALLOW.includes(origin));
   },
   credentials: true,
-  methods: ["GET","POST","PATCH","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization","X-Request-Id"]
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Request-Id"]
 }));
 
 // ---------- DB ----------
 const isProd = process.env.NODE_ENV === "production";
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // SSL for Render Postgres (both local -> Render, and on Render)
   ssl: { rejectUnauthorized: false }
 });
 
@@ -116,137 +115,7 @@ app.post("/api/orders", async (req, res) => {
   }
 });
 
-app.get("/api/orders", async (_req, res) => {
-  const sql = `
-    SELECT o.id, o.order_code, o.order_type, o.status, o.created_at,
-           c.name AS customer_name,
-           COALESCE(SUM(oli.total_cents),0) AS total_cents
-    FROM orders o
-    JOIN customers c ON c.id = o.customer_id
-    LEFT JOIN order_line_items oli ON oli.order_id = o.id
-    GROUP BY o.id, c.name
-    ORDER BY o.created_at DESC
-    LIMIT 50
-  `;
-  const { rows } = await pool.query(sql);
-  res.json(rows.map(r => ({ ...r, total_myr: Number(r.total_cents) / 100 })));
-});
-
-// ---------- Transactions ----------
-app.post("/api/transactions", async (req, res) => {
-  const b = req.body || {};
-  const amt = Number(b.amount_myr);
-  const amountProvided = b.amount_myr !== undefined && b.amount_myr !== null && Number.isFinite(amt);
-  if (!b.order_id || !b.type || !amountProvided) {
-    return res.status(400).json({ error: "order_id, type, amount_myr required" });
-  }
-  if (amt < 0) return res.status(400).json({ error: "amount_myr cannot be negative" });
-
-  const amount_cents = Math.round(amt * 100);
-  try {
-    await pool.query(
-      `INSERT INTO transactions (order_id, type, method, amount_cents, reference, notes)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [b.order_id, b.type, b.method || null, amount_cents, b.reference || null, b.notes || null]
-    );
-    res.status(201).json({ ok: true });
-  } catch (e) {
-    console.error("[tx]", e.message);
-    res.status(400).json({ error: e.message });
-  }
-});
-
-// ---------- Schedules (recurring) ----------
-app.post("/api/schedules", async (req, res) => {
-  const b = req.body || {};
-  if (!b.order_id || !b.schedule_type || !b.frequency || b.amount_myr === undefined || !b.next_due_date)
-    return res.status(400).json({ error: "missing required fields" });
-
-  const amount_cents = Math.round(Number(b.amount_myr) * 100);
-  try {
-    const r = await pool.query(
-      `INSERT INTO recurring_schedules (order_id, schedule_type, frequency, amount_cents, total_cycles, next_due_date, grace_days)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
-       RETURNING id`,
-      [b.order_id, b.schedule_type, b.frequency, amount_cents, b.total_cycles || null, b.next_due_date, b.grace_days || 3]
-    );
-    res.status(201).json({ schedule_id: r.rows[0].id });
-  } catch (e) {
-    console.error("[add-schedule]", e.message);
-    res.status(400).json({ error: e.message });
-  }
-});
-
-// ---------- Outstanding (TZ-aware buckets) ----------
-app.get("/api/outstanding", async (req, res) => {
-  const type = req.query.type;
-  const dueBefore = req.query.due_before || dateStrInTZ();
-  const overdueOnly = String(req.query.overdue_only || "false").toLowerCase() === "true";
-
-  const params = [dueBefore];
-  let where = "s.status='active' AND s.next_due_date <= $1";
-  if (type) { params.push(type); where += ` AND s.schedule_type = $${params.length}`; }
-
-  const sql = `
-    SELECT s.id AS schedule_id, s.order_id, s.schedule_type, s.frequency, s.amount_cents,
-           s.next_due_date, s.grace_days,
-           o.order_code, c.name AS customer_name, c.phone_primary
-    FROM recurring_schedules s
-    JOIN orders o ON o.id = s.order_id
-    JOIN customers c ON c.id = o.customer_id
-    WHERE ${where}
-    ORDER BY s.next_due_date ASC
-  `;
-  const { rows: schedules } = await pool.query(sql, params);
-
-  const today = asUTCmidnight(dueBefore);
-  const out = [];
-
-  for (const s of schedules) {
-    const freqDays = s.frequency === "weekly" ? 7 : 30;
-    const cycleStart = new Date(new Date(s.next_due_date).getTime() - freqDays * 86400000);
-
-    const pays = await pool.query(
-      `SELECT COALESCE(SUM(amount_cents),0) AS paid
-       FROM transactions
-       WHERE order_id=$1 AND type IN ('payment','deposit')
-         AND paid_at BETWEEN $2 AND ($3::date + interval '1 day')`,
-      [s.order_id, cycleStart, dueBefore]
-    );
-    const paid = Number(pays.rows[0].paid || 0);
-    const due = Number(s.amount_cents);
-    const outstanding = Math.max(due - paid, 0);
-
-    const dueStr = toYMD(s.next_due_date);
-    const dueUTC = asUTCmidnight(dueStr);
-    const daysLate = Math.floor((+today - +dueUTC) / 86400000) - Number(s.grace_days || 0);
-
-    let bucket = "current";
-    if (daysLate > 0 && daysLate <= 7) bucket = "1-7";
-    else if (daysLate >= 8 && daysLate <= 30) bucket = "8-30";
-    else if (daysLate > 30) bucket = ">30";
-
-    if (!overdueOnly || outstanding > 0) {
-      out.push({
-        order_id: s.order_id,
-        order_code: s.order_code,
-        schedule_id: s.schedule_id,
-        schedule_type: s.schedule_type,
-        frequency: s.frequency,
-        amount_myr: due / 100,
-        due_date: s.next_due_date,
-        customer_name: s.customer_name,
-        phone: s.phone_primary,
-        outstanding_myr: outstanding / 100,
-        days_late: Math.max(daysLate, 0),
-        bucket
-      });
-    }
-  }
-  res.json(out);
-});
-
-// ---------- AI Intake (OpenAI Structured Output) ----------
+// ---------- AI Intake Parsing (OpenAI) ----------
 const oaClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const intakeSchema = {
@@ -257,7 +126,7 @@ const intakeSchema = {
     customer_address: { type: "string" },
     customer_phone_primary: { type: "string" },
     customer_phone_secondary: { type: "string" },
-    order_type: { enum: ["outright_purchase","instalment","rent"] },
+    order_type: { enum: ["outright_purchase", "instalment", "rent"] },
     line_items: {
       type: "array",
       items: {
@@ -269,14 +138,14 @@ const intakeSchema = {
           qty: { type: "number" },
           unit_price_myr: { type: "number" }
         },
-        required: ["description","qty"],
+        required: ["description", "qty"],
       }
     },
-    delivery_type: { enum: ["one_way","two_way"] },
-    action_type: { enum: ["new_order","cancel_instalment","terminate_rental","buy_back"] },
+    delivery_type: { enum: ["one_way", "two_way"] },
+    action_type: { enum: ["new_order", "cancel_instalment", "terminate_rental", "buy_back"] },
     original_order_id: { type: "string" }
   },
-  required: ["customer_name","customer_phone_primary","order_type","line_items"]
+  required: ["customer_name", "customer_phone_primary", "order_type", "line_items"]
 };
 
 // Helper to map Malay keywords if model misses it (belt & braces)
@@ -312,13 +181,10 @@ app.post("/api/intake/parse", async (req, res) => {
     const user = `Chat transcript:\n---\n${rawText}\n---\nReturn JSON only.`;
 
     const resp = await oaClient.responses.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o-mini", // cost-effective; change if you prefer another
       instructions: system,
       input: user,
-      text: {
-        format: "json_schema",
-        json_schema: { name: "oms_order", schema: intakeSchema, strict: true }
-      }
+      text: { format: "json_schema", json_schema: { name: "oms_order", schema: intakeSchema, strict: true } }
     });
 
     // Robust parse
@@ -409,8 +275,7 @@ app.post("/api/intake/parse", async (req, res) => {
       console.error("[intake-create][db]", dbErr.message);
       return res.status(400).json({ error: dbErr.message });
     } finally {
-      // If we used a dedicated client, release it
-      // (If we used pool.query directly, no client to release)
+      client.release();
     }
   } catch (e) {
     console.error("[intake-parse]", e?.message || e);
